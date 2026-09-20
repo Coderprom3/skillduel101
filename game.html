@@ -124,6 +124,13 @@
   #quickMatchBtn .stampnum{ color:var(--mustard); }
   #quickMatchBtn small{ display:block; font-weight:400; color:var(--ink-soft); margin-top:6px; font-size:10px; line-height:1.4; text-transform:none; letter-spacing:0; }
 
+  .accountPanel{ margin:4px 0 16px; text-align:center; }
+  .acctLabel{ font-size:9.5px; color:var(--ink-soft); letter-spacing:.5px; text-transform:uppercase; margin-bottom:10px; }
+  .acctInput{ max-width:150px; font-size:12px; letter-spacing:.3px; text-transform:none; padding:9px; }
+  .acctMsg{ font-size:10.5px; color:var(--red); min-height:14px; margin-top:8px; }
+  #accountLoggedIn{ font-size:12.5px; }
+  #acctWelcome{ font-weight:700; }
+
   #onlineWait{
     background:var(--paper-dark);
     border:2.5px solid var(--ink);
@@ -426,6 +433,26 @@
 
     <div class="setupRule"></div>
     <div class="modeLabel">Online PvP</div>
+
+    <div class="accountPanel" id="accountPanel">
+      <div id="accountLoggedOut">
+        <div class="acctLabel">Account (optional — saves your rank across devices)</div>
+        <div class="diffRow" style="gap:8px;">
+          <input id="acctUsername" class="codeInput acctInput" placeholder="username" autocomplete="username"/>
+          <input id="acctPassword" type="password" class="codeInput acctInput" placeholder="password" autocomplete="current-password"/>
+        </div>
+        <div class="diffRow" style="margin-top:8px; gap:8px;">
+          <button class="newGameBtn" id="acctLoginBtn">Log in</button>
+          <button class="newGameBtn" id="acctRegisterBtn">Register</button>
+        </div>
+        <p id="acctError" class="acctMsg"></p>
+      </div>
+      <div id="accountLoggedIn" class="hidden">
+        <span id="acctWelcome"></span>
+        <button class="newGameBtn" id="acctLogoutBtn" style="margin-left:10px;">Log out</button>
+      </div>
+    </div>
+
     <div class="rankBar" id="rankBadge"></div>
     <div class="diffRow">
       <button class="diffBtn online" id="quickMatchBtn" style="min-width:170px;"><span class="stampnum">⚡</span><br>Quick Match<small>Auto-pairs you with anyone waiting.</small></button>
@@ -626,6 +653,14 @@ let roomCode = null, localRole = null;
 let submittedThisRound = false;
 let transport = 'p2p'; // 'p2p' (WebRTC/PeerJS) | 'server' (matchmaking WebSocket)
 let matchSocket = null;
+
+// account state (optional — game works fine logged out, using local-only rank tracking)
+let accountState = { loggedIn:false, username:null, token:null, profile:null };
+function apiBaseUrl(){
+  const raw = document.getElementById('matchServerInput').value.trim();
+  if(!raw) return null;
+  return raw.replace(/^wss:\/\//i, 'https://').replace(/^ws:\/\//i, 'http://').replace(/\/$/, '');
+}
 
 function newPlayer(label){
   return { label, hp: MAX_HP, block: 0, poison: 0, regen: 0, weakened: 0, noBlockNext:false, counter:0 };
@@ -1199,52 +1234,183 @@ async function saveRankProfile(){
 function renderRankBadge(){
   const el = document.getElementById('rankBadge');
   if(!el) return;
+
+  if(accountState.loggedIn && accountState.profile){
+    const p = accountState.profile;
+    if(p.matches < RANK_UP_MIN_MATCHES){
+      const remaining = RANK_UP_MIN_MATCHES - p.matches;
+      el.innerHTML = `<span class="rankUnranked">${accountState.username} — unranked — play ${remaining} more match${remaining===1?'':'es'} to get ranked</span>`;
+      return;
+    }
+    const rank = getRankForPoints(p.points);
+    el.innerHTML = `<span class="rankChip" style="--rc:${rank.color}">${rankIconSvg(rank)}${rank.name}</span><span class="rankPts">${accountState.username} · ${p.points} pts · ${p.wins}W ${p.losses}L ${p.draws}D</span>`;
+    return;
+  }
+
+  // Guest fallback — tracked locally in this browser only
   if(rankProfile.matches < RANK_UP_MIN_MATCHES){
     const remaining = RANK_UP_MIN_MATCHES - rankProfile.matches;
-    el.innerHTML = `<span class="rankUnranked">Unranked — play ${remaining} more online match${remaining===1?'':'es'} to get ranked</span>`;
+    el.innerHTML = `<span class="rankUnranked">Unranked (guest) — play ${remaining} more online match${remaining===1?'':'es'} to get ranked</span>`;
     return;
   }
   const rank = getRankForPoints(rankProfile.points);
-  el.innerHTML = `<span class="rankChip" style="--rc:${rank.color}">${rankIconSvg(rank)}${rank.name}</span><span class="rankPts">${rankProfile.points} pts · ${rankProfile.wins}W ${rankProfile.losses}L ${rankProfile.draws}D</span>`;
+  el.innerHTML = `<span class="rankChip" style="--rc:${rank.color}">${rankIconSvg(rank)}${rank.name}</span><span class="rankPts">Guest · ${rankProfile.points} pts · ${rankProfile.wins}W ${rankProfile.losses}L ${rankProfile.draws}D</span>`;
 }
 
-function recordOnlineResult(outcome){
-  const prevRank = rankProfile.matches >= RANK_UP_MIN_MATCHES ? getRankForPoints(rankProfile.points).name : null;
+function buildRankChangeHtml(prevRankName, matches, points){
+  const newRank = matches >= RANK_UP_MIN_MATCHES ? getRankForPoints(points).name : null;
+  let message = '', color = 'var(--ink-soft)', iconHtml = '';
+  if(prevRankName === null && newRank !== null){
+    const rk = getRankForPoints(points);
+    message = `You've been ranked: ${newRank}!`;
+    color = rk.color; iconHtml = rankIconSvg(rk, 20);
+  } else if(prevRankName && newRank && prevRankName !== newRank){
+    const prevIdx = RANKS.findIndex(r=>r.name===prevRankName);
+    const newIdx = RANKS.findIndex(r=>r.name===newRank);
+    const rk = getRankForPoints(points);
+    message = newIdx > prevIdx ? `Promoted to ${newRank}!` : `Demoted to ${newRank}.`;
+    color = rk.color; iconHtml = rankIconSvg(rk, 20);
+  } else if(newRank){
+    const rk = getRankForPoints(points);
+    message = `Rank: ${newRank} (${points} pts)`;
+    color = rk.color; iconHtml = rankIconSvg(rk, 20);
+  } else {
+    const remaining = RANK_UP_MIN_MATCHES - matches;
+    message = `${remaining} more online match${remaining===1?'':'es'} until you're ranked.`;
+  }
+  return `<span class="rankChange" style="color:${color}">${iconHtml}${message}</span>`;
+}
 
+async function recordOnlineResult(outcome){
+  if(accountState.loggedIn && accountState.token){
+    const prevRank = (accountState.profile && accountState.profile.matches >= RANK_UP_MIN_MATCHES)
+      ? accountState.profile.rank : null;
+    try{
+      const base = apiBaseUrl();
+      const res = await fetch(base + '/profile/result', {
+        method: 'POST',
+        headers: { 'Content-Type':'application/json', 'Authorization':'Bearer ' + accountState.token },
+        body: JSON.stringify({ outcome })
+      });
+      const data = await res.json();
+      if(res.ok){
+        accountState.profile = data.profile;
+        renderRankBadge();
+        const goRank = document.getElementById('goRank');
+        if(goRank) goRank.innerHTML = buildRankChangeHtml(prevRank, data.profile.matches, data.profile.points);
+        return;
+      }
+    } catch(e){ /* server unreachable this instant — fall through to local tracking below so the result isn't lost */ }
+  }
+
+  // Local (guest) tracking, or fallback if the server call above failed
+  const prevRank = rankProfile.matches >= RANK_UP_MIN_MATCHES ? getRankForPoints(rankProfile.points).name : null;
   rankProfile.matches++;
   if(outcome === 'win'){ rankProfile.wins++; rankProfile.points += 18; }
   else if(outcome === 'loss'){ rankProfile.losses++; rankProfile.points = Math.max(0, rankProfile.points - 14); }
   else { rankProfile.draws++; rankProfile.points += 4; }
-
   saveRankProfile();
   renderRankBadge();
-
-  const newRank = rankProfile.matches >= RANK_UP_MIN_MATCHES ? getRankForPoints(rankProfile.points).name : null;
-
-  let message = '', color = 'var(--ink-soft)', iconHtml = '';
-  if(prevRank === null && newRank !== null){
-    const rk = getRankForPoints(rankProfile.points);
-    message = `You've been ranked: ${newRank}!`;
-    color = rk.color; iconHtml = rankIconSvg(rk, 20);
-  } else if(prevRank && newRank && prevRank !== newRank){
-    const prevIdx = RANKS.findIndex(r=>r.name===prevRank);
-    const newIdx = RANKS.findIndex(r=>r.name===newRank);
-    const rk = getRankForPoints(rankProfile.points);
-    message = newIdx > prevIdx ? `Promoted to ${newRank}!` : `Demoted to ${newRank}.`;
-    color = rk.color; iconHtml = rankIconSvg(rk, 20);
-  } else if(newRank){
-    const rk = getRankForPoints(rankProfile.points);
-    message = `Rank: ${newRank} (${rankProfile.points} pts)`;
-    color = rk.color; iconHtml = rankIconSvg(rk, 20);
-  } else {
-    message = `${RANK_UP_MIN_MATCHES - rankProfile.matches} more online match${(RANK_UP_MIN_MATCHES - rankProfile.matches)===1?'':'es'} until you're ranked.`;
-  }
-
   const goRank = document.getElementById('goRank');
-  if(goRank) goRank.innerHTML = `<span class="rankChange" style="color:${color}">${iconHtml}${message}</span>`;
+  if(goRank) goRank.innerHTML = buildRankChangeHtml(prevRank, rankProfile.matches, rankProfile.points);
 }
 
 loadRankProfile();
+
+// ================= ACCOUNTS =================
+function acctError(msg){
+  const el = document.getElementById('acctError');
+  if(el) el.textContent = msg;
+}
+
+function showAccountUI(){
+  const loggedOut = document.getElementById('accountLoggedOut');
+  const loggedIn = document.getElementById('accountLoggedIn');
+  if(accountState.loggedIn){
+    loggedOut.classList.add('hidden');
+    loggedIn.classList.remove('hidden');
+    document.getElementById('acctWelcome').textContent = 'Signed in as ' + accountState.username;
+  } else {
+    loggedOut.classList.remove('hidden');
+    loggedIn.classList.add('hidden');
+  }
+  renderRankBadge();
+}
+
+function finishLogin(data){
+  accountState.loggedIn = true;
+  accountState.username = data.profile.username;
+  accountState.token = data.token;
+  accountState.profile = data.profile;
+  try{
+    localStorage.setItem('skillduel-account', JSON.stringify({ token: data.token, username: data.profile.username }));
+  } catch(e){}
+  const pwField = document.getElementById('acctPassword');
+  if(pwField) pwField.value = '';
+  showAccountUI();
+}
+
+async function acctRegister(){
+  acctError('');
+  const base = apiBaseUrl();
+  if(!base){ acctError('Enter your matchmaking server URL first (below).'); return; }
+  const username = document.getElementById('acctUsername').value.trim();
+  const password = document.getElementById('acctPassword').value;
+  try{
+    const res = await fetch(base + '/register', {
+      method:'POST', headers:{ 'Content-Type':'application/json' },
+      body: JSON.stringify({ username, password })
+    });
+    const data = await res.json();
+    if(!res.ok){ acctError(data.error || 'Could not register.'); return; }
+    finishLogin(data);
+  } catch(e){
+    acctError('Could not reach the server. Check the URL below and try again.');
+  }
+}
+
+async function acctLogin(){
+  acctError('');
+  const base = apiBaseUrl();
+  if(!base){ acctError('Enter your matchmaking server URL first (below).'); return; }
+  const username = document.getElementById('acctUsername').value.trim();
+  const password = document.getElementById('acctPassword').value;
+  try{
+    const res = await fetch(base + '/login', {
+      method:'POST', headers:{ 'Content-Type':'application/json' },
+      body: JSON.stringify({ username, password })
+    });
+    const data = await res.json();
+    if(!res.ok){ acctError(data.error || 'Could not log in.'); return; }
+    finishLogin(data);
+  } catch(e){
+    acctError('Could not reach the server. Check the URL below and try again.');
+  }
+}
+
+function acctLogout(){
+  accountState = { loggedIn:false, username:null, token:null, profile:null };
+  try{ localStorage.removeItem('skillduel-account'); } catch(e){}
+  showAccountUI();
+}
+
+async function tryAutoLogin(){
+  let saved = null;
+  try{ saved = JSON.parse(localStorage.getItem('skillduel-account') || 'null'); } catch(e){}
+  if(!saved || !saved.token) return;
+  const base = apiBaseUrl();
+  if(!base) return; // no server URL saved yet — can't verify, stays logged out for now
+  try{
+    const res = await fetch(base + '/profile', { headers:{ 'Authorization': 'Bearer ' + saved.token } });
+    if(!res.ok) return; // token expired/invalid — leave it; user can just log in again
+    const data = await res.json();
+    accountState.loggedIn = true;
+    accountState.username = saved.username;
+    accountState.token = saved.token;
+    accountState.profile = data.profile;
+    showAccountUI();
+  } catch(e){ /* server unreachable right now — stay logged out for this session */ }
+}
 
 // ================= ONLINE PVP ENGINE (WebRTC, peer-to-peer) =================
 // Uses PeerJS purely to help two browsers find each other (the free public
@@ -1743,6 +1909,11 @@ document.getElementById('cancelWaitBtn').onclick = () => {
     try{ localStorage.setItem('skillduel-match-server', input.value.trim()); } catch(e){}
   });
 })();
+
+document.getElementById('acctLoginBtn').onclick = () => { playSfx('click'); acctLogin(); };
+document.getElementById('acctRegisterBtn').onclick = () => { playSfx('click'); acctRegister(); };
+document.getElementById('acctLogoutBtn').onclick = () => { playSfx('click'); acctLogout(); };
+tryAutoLogin();
 
 // ================= CREATOR PANEL =================
 (function(){
